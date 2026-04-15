@@ -1,6 +1,6 @@
 # Studio Darkroom
 
-> 🚧 In active development — focused on refining UI behavior, performance, and advanced filtering systems.
+🚧 In active development — focused on refining UI behavior, performance, and advanced filtering systems.
 
 Studio Darkroom is a smart media organization system built for WordPress.
 
