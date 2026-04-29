@@ -1,352 +1,136 @@
 # Architecture
 
-The engineering deep-dive companion to the [README](README.md). This document covers the patterns and decisions that shape the codebase — the dual-layer migration, the systems that make folders fast on large libraries, the license validation flow, and the security model.
+A high-level look at how Studio Darkroom is designed — the patterns that shape the codebase, the engineering decisions worth talking about, and the principles the project optimizes for.
 
-> Source code is private. This page documents the architecture for prospective collaborators, employers, and technical peers.
-
----
-
-## 1. Dual-layer PHP architecture
-
-The codebase has two PHP layers running side-by-side:
-
-```
-┌──────────────────────────────────┐  ┌──────────────────────────────────┐
-│  /app  (modern, namespaced)      │  │  /inc  (legacy, procedural)      │
-│                                  │  │                                  │
-│  StudioDarkroom\Folders\…        │  │  function snapmedia_…()          │
-│  StudioDarkroom\Ajax\…           │  │  add_action(…, 'snapmedia_…')    │
-│  StudioDarkroom\Security\…       │  │  global $studiodarkroom_…        │
-│                                  │  │                                  │
-│  PSR-4 autoloaded                │  │  Loaded via require_once         │
-│  Class-based, dependency-aware   │  │  Snake-case helpers              │
-└──────────────────────────────────┘  └──────────────────────────────────┘
-                  ▲                                       ▲
-                  │                                       │
-                  └───────────────┬───────────────────────┘
-                                  │
-                       studiodarkroom.php
-                       (plugin bootstrap; loads both)
-```
-
-### Why two layers
-
-The modern `/app` layer is where new features land — namespaces, typed methods, dependency-aware classes.
-
-The legacy `/inc` layer is where the original procedural code lives — admin-ajax handlers, capability checks, folder model helpers, the license client, crash guard, diagnostics. It's stable and battle-tested.
-
-This was a deliberate decision. Two common failure modes exist for codebases in this position:
-
-1. **Big-bang rewrite** — fork the codebase, rebuild from scratch, ship months later (or never)
-2. **Endless deprecation** — drag legacy code along forever, never finish migrating
-
-The chosen path is **gradual migration tied to feature work**. Touching a legacy cluster for a bug fix? Stay surgical. Adding a feature that needs to interact with the cluster? Migrate the cluster first, then add the feature. The legacy layer shrinks one cohesive unit at a time. No big-bang risk, no permanent technical debt.
-
-### Practical rules
-
-- **New features** land in `/app` under the appropriate namespace
-- **Bug fixes in legacy code** stay in `/inc` if surgical; migrate the cluster if the fix would touch three+ files
-- **Cross-layer calls** — `/app` calling `/inc` is fine (legacy is the substrate); `/inc` calling `/app` is rare and well-commented when it happens
-- **Both layers share prefix conventions** — `studiodarkroom_*` for procedural, `StudioDarkroom\*` for namespaced
+> Source code is private. This page covers the *thinking*, not the *recipe* — implementation specifics live in the private repo.
 
 ---
 
-## 2. Directory layout
+## A modular, layered system
 
-```
-studiodarkroom/
-├── app/                          # Modern, namespaced classes (PSR-4)
-│   ├── Admin/                    # Admin screens, settings, role-preview matrix
-│   ├── Ajax/                     # AJAX controllers (FolderAjaxController, etc.)
-│   ├── Api/                      # REST API endpoints
-│   ├── Core/                     # Plugin lifecycle, autoloader, container
-│   ├── Focus/                    # Focal-point system
-│   ├── Folders/                  # Folder taxonomy + smart-folder engine
-│   ├── Media/                    # Attachment metadata, hash + duplicate detection
-│   ├── Migration/                # Schema/data migrations between versions
-│   ├── Modules/                  # Optional feature modules (Gallery, etc.)
-│   ├── Security/                 # Capability checks, sanitization, CSRF
-│   ├── Support/                  # Diagnostics, env reports, crash dispatcher
-│   ├── Telemetry/                # Sentry integration, opt-in usage signals
-│   ├── Tools/                    # Bulk operations, import/export
-│   ├── UI/                       # Admin UI helpers, asset enqueueing
-│   ├── Undo/                     # Trash + restore for folder deletes
-│   ├── Uploads/                  # SVG sanitization, MIME hardening
-│   └── WooCommerce/              # WC product gallery / image overrides
-│
-├── inc/                          # Legacy procedural layer (~30 files)
-│   ├── capabilities.php
-│   ├── crash-guard.php
-│   ├── diagnostics.php
-│   ├── folder-model.php
-│   ├── lite-recovery.php
-│   ├── class-studiodarkroom-license-client.php
-│   ├── class-studiodarkroom-license-manager.php
-│   └── …
-│
-├── assets/                       # CSS + JS, no build step
-├── views/                        # Admin page templates
-├── templates/                    # UI components (modals, partials)
-├── blocks/                       # Gutenberg blocks
-├── bricks-elements/              # Bricks-native elements
-├── tests/                        # PHPUnit (unit + integration)
-├── docs/                         # Public-facing documentation
-├── languages/                    # .pot / .po / .mo
-├── licenses/                     # Third-party license notices
-├── composer.json
-└── phpunit.xml.dist
-```
+Studio Darkroom is a backend-first WordPress plugin. The codebase is structured so each system can evolve independently — folders, smart filtering, focal points, the gallery module, the licensing layer, and the diagnostics surface all live as separate concerns with clear boundaries.
+
+The plugin runs on a **dual-layer pattern**: a modern, namespaced layer where new features land, and a stable legacy layer where the original code continues to operate. Migration between the two is gradual and tied to feature work — never a big-bang rewrite, never an endless deprecation drag. Each cluster moves when the cost of touching it without modernization exceeds the cost of modernizing it.
+
+This is the kind of decision that's easy to get wrong. Two failure modes are common in codebases at this size:
+
+- **The big-bang rewrite** — fork the codebase, rebuild from scratch, ship months later (or never)
+- **The endless deprecation** — drag legacy code along forever, accumulating debt, never finishing the migration
+
+The chosen path avoids both. Legacy code keeps working until it has a reason to change; when it changes, it modernizes. The tech debt curve trends down naturally.
 
 ---
 
-## 3. Folder system — data model
+## Folders that scale
 
-Folders are a **custom taxonomy** registered as `studiodarkroom_folder`. Every folder is a standard WordPress term, which means:
+The folder system is built around a simple insight: **WordPress already has the right primitive — taxonomies — for hierarchical organization with shared metadata.** The plugin uses that primitive instead of inventing custom database tables.
 
-- Hierarchy and ordering live in `wp_terms` + `wp_term_taxonomy` (no custom tables)
-- Folder ↔ attachment associations live in `wp_term_relationships`
-- Every plugin that respects taxonomies sees folders for free — search, REST API, cache, export
-- Export/import is a JSON dump of term tree + relationships — survives staging→production migrations
+The benefit isn't just that there's less code to write. It's that every other plugin that respects WordPress taxonomies — search, REST API, caching layers, export tools — sees folders for free. Migrating a site between hosts is a JSON export of standard term data. There's nothing exotic to back up. There's nothing exotic to break.
 
-### Smart folders are virtual
+Smart folders take a different approach. Rather than physically grouping attachments, they're virtual views composed at query time. The "Missing Alt Text" view, the "Duplicates" view, the "Recently Uploaded" view — none of these are stored. They're computed. As the library changes, the views update automatically without anyone running a sync.
 
-Smart folders aren't terms. They're rendered by querying attachments with specific `WP_Query` arguments:
-
-| Smart folder | Query strategy |
-|---|---|
-| Missing Alt Text | `meta_query` for empty `_wp_attachment_image_alt` |
-| Large Images | `meta_query` for filesize > threshold |
-| Unused Media | attachments with zero post-relationship |
-| Duplicates | grouped by content-hash custom field |
-| Recently Uploaded | `date_query` last 7 days |
-| SVG / PDF / Video | `mime_type` filter |
-| Favorites | `meta_query` `_studiodarkroom_starred=1` |
-| Hero / Brand / Campaign | `meta_query` workflow tag |
-| Rating 1–5 | `meta_query` rating field |
-
-The smart-folder engine in `app/Folders/` exposes a registry so future features (or Pro-tier add-ons) can register their own smart folders without modifying core.
+The smart-folder system is itself extensible — future Pro-tier features and sister plugins can register their own without modifying core.
 
 ---
 
-## 4. Focal-point system
+## A licensing layer that doesn't punish customers
 
-Per-attachment focal coordinates are stored in attachment meta:
+Licensing is one of the trickier problems in commercial WordPress plugins. Network blips, upstream server downtime, customer hosts blocking outbound HTTPS — any of these can fail a license check. A naive implementation locks the plugin and the customer emails support, frustrated.
 
-```
-_studiodarkroom_focal           = {x: 0.5, y: 0.5}     // default focal
-_studiodarkroom_focal_1x1       = {x: 0.5, y: 0.5}     // square override
-_studiodarkroom_focal_16x9      = {x: 0.5, y: 0.4}     // wide override
-_studiodarkroom_focal_4x5       = {x: 0.5, y: 0.6}     // portrait override
-```
+The licensing layer is built around two principles:
 
-Themes consume via:
+**State, not boolean.** License status isn't "valid / invalid." It's a state machine that captures the real-world transitions a license goes through over its lifetime — activation, periodic revalidation, transient unreachable states, eventual expiration, manual reactivation. Each state has explicit allowed actions and explicit UI surfacing. A license that *was* valid but failed its most recent revalidation behaves very differently from one that was *never* valid.
 
-```php
-studiodarkroom_get_focal( $attachment_id, '16:9' );
-// Returns the override if set, falls back to the default focal,
-// falls back to {0.5, 0.5}.
-```
+**Grace, not hard-fail.** When the remote server is unreachable, the plugin doesn't lock immediately. There's a multi-day grace period that bridges transient outages. Customer sites keep working. The plugin only locks once "transient" no longer fits the situation.
 
-The cover/contain logic in CSS uses the focal coordinates as `object-position` values.
+Local development environments get a bypass — administrators can run unlicensed on `localhost`, `*.local`, and any environment WordPress identifies as `local`, `development`, or `staging`. Production stays strict. The result is a licensing layer that's invisible when things are working and predictable when they're not.
 
 ---
 
-## 5. License validation flow
+## A safety contract between Lite and Pro
 
-License state lives in three places:
+The plugin ships in two editions: a free Lite tier with the core organization features, and a licensed Pro tier with the advanced surface — gallery output, bulk operations, advanced smart folders, diagnostics.
 
-```
-Remote license server (Lemon Squeezy)   ← source of truth
-        │
-        │  HTTPS, signed responses
-        ▼
-inc/class-studiodarkroom-license-client.php
-        │
-        │  caches result in wp_options
-        ▼
-inc/class-studiodarkroom-license-manager.php
-        │
-        │  exposes state to feature gates
-        ▼
-Plugin features   (read state, gate behavior)
-```
+The hard part isn't gating features. It's letting customers move between editions without losing work.
 
-### State machine
-
-```
-unactivated  →  activate(key)   → active
-active       →  revalidate()   → active | grace | expired
-grace        →  revalidate()   → active | expired
-expired      →  activate(key)  → active | invalid
-invalid      → (terminal until user pastes new key)
-```
-
-### Grace period
-
-When the remote server is unreachable (network failure, server downtime), the manager enters a **7-day grace period** before downgrading to `expired`. This keeps customer sites working through transient outages. The plugin only locks if the server has been unreachable for a full week — well past any normal operational hiccup.
-
-### Local development bypass
-
-`wp_get_environment_type()` returning `local`, `development`, or `staging` triggers a development bypass — administrators can run unlicensed for local work. Production stays strict.
-
----
-
-## 6. Lite ↔ Pro safety contract
-
-The plugin ships in two editions:
-
-- **Lite** — free, limited feature surface (folder basics, smart folders, focal points)
-- **Pro** — licensed, full feature surface (gallery, bulk ops, diagnostics, advanced smart folders)
-
-The hard part isn't gating features — it's letting customers downgrade safely.
-
-The **swap contract** guarantees:
+The **swap contract** guarantees three things:
 
 - Downgrading Pro → Lite preserves all folder structure and attachment metadata
-- Pro-only data (gallery presets, advanced workflow tags) is **frozen but not destroyed**
+- Pro-only data isn't deleted; it's frozen, waiting
 - Re-upgrading restores everything exactly as it was
 
-This is what makes Lite safe to install on production. Customers can experiment with Lite, upgrade to Pro for evaluation, drop back to Lite if they don't want to renew, and **never lose their data**. That trust is what justifies the price tier.
+This is what makes Lite safe to install on production sites. Customers can experiment with Lite, upgrade to Pro for evaluation, drop back to Lite if they don't want to renew, and never lose their data. That trust is what justifies the price tier.
 
 ---
 
-## 7. Security model
+## A security mindset
 
-### Capability gating
+The plugin handles file uploads, taxonomies, attachment metadata, and AJAX endpoints — every category of attack surface a WordPress plugin can have. The security model is layered:
 
-Six plugin-specific capabilities, mapped to WordPress roles:
+- **Capability-based access control.** Plugin features are gated by plugin-specific WordPress capabilities, mappable per-role by site administrators. Features check capabilities at the entry point of every action, not at the UI layer.
+- **Nonce verification on every state-changing request.** AJAX, REST, and form submissions all verify a plugin-scoped nonce. Cross-site requests are rejected at the boundary.
+- **Sanitization on input, escaping on output.** Standard WordPress functions, applied consistently. No clever shortcuts.
+- **SVG hardening.** SVG uploads are disabled by default. When enabled per-role, every uploaded SVG passes through a hardened sanitizer that strips inline scripts, external references, and event handlers before the file reaches the uploads directory.
+- **MIME validation against extension.** Every upload is checked against its actual file content, not just its extension. Belt and suspenders.
 
-```
-studiodarkroom_view_library
-studiodarkroom_edit_attachments
-studiodarkroom_create_folders
-studiodarkroom_delete_folders
-studiodarkroom_run_bulk_ops
-studiodarkroom_view_diagnostics
-```
-
-Administrators always have all six regardless of role mapping. Other roles get capabilities granted by the admin in **Settings → Roles**.
-
-### Nonce + origin checks
-
-Every AJAX handler verifies a plugin-specific nonce. REST endpoints use the standard WP nonce. Origin checks reject cross-site requests.
-
-### Input sanitization
-
-- `sanitize_text_field` for plain strings
-- `sanitize_key` for option keys + slugs
-- `esc_url_raw` for URLs on save, `esc_url` on render
-- `wp_kses_post` for rich text fields
-- Folder names: stripped to printable Unicode, length-capped at 200 chars
-
-### SVG hardening
-
-SVG uploads disabled by default. When enabled per-role, every uploaded SVG passes through `enshrined/svg-sanitize` before reaching the uploads directory. Inline scripts, external references, and event handlers are stripped.
-
-### MIME validation
-
-`finfo` checks every upload's actual MIME type against the file extension, rejecting mismatches. Belt + suspenders against `image.jpg.php` style attacks.
+These aren't novel security techniques. They're the basics done consistently. Most plugin vulnerabilities aren't sophisticated — they're a missing nonce, an un-sanitized input, an over-trusted capability. The architecture's job is making "the right thing" the default path so individual handlers don't have to remember.
 
 ---
 
-## 8. Crash guard + diagnostics
+## A graceful failure surface
 
-WordPress's default error handler renders a "There has been a critical error" page — useless for debugging. Worse, fatal errors during early hooks happen before WordPress even initializes its handler, so visitors see a raw PHP stack trace.
+WordPress's default error handler renders "There has been a critical error" — a single sentence that gives the user nothing to act on. Worse, fatal errors during early hooks happen before WordPress even initializes its handler, leaving visitors looking at raw PHP output.
 
-The plugin registers its own fatal-error handler that:
+The plugin registers its own fatal-error handler that catches early-hook fatals before they leak, captures a scrubbed environment snapshot, optionally forwards to Sentry, and renders a graceful admin notice. The Diagnostics page surfaces the same data plus role-preview matrices, environment checks, license status, and a copy-report button that produces a sharable Markdown snapshot for support tickets.
 
-1. Catches early-hook fatals before WP's screen renders
-2. Captures a scrubbed environment snapshot (no PII)
-3. Forwards to Sentry (production only, opt-in)
-4. Renders a graceful admin notice instead of a white screen of death
-
-The Diagnostics page surfaces:
-
-- WordPress + PHP + plugin versions
-- Active theme + active plugins
-- License status + tier + expiration
-- Recent failures (last 50, scrubbed of PII)
-- Role-preview matrix (capability check across all roles)
-- A **"Copy diagnostics report"** button that produces a sharable Markdown snapshot for support tickets
+The design goal is simple: when something breaks, the customer should be able to send a useful report without installing a debugger or opening DevTools.
 
 ---
 
-## 9. Performance considerations
+## Performance, where it actually matters
 
-### Folder query hot path
+Most WordPress performance work is premature optimization. The architecture treats performance as a discipline applied to **specific hot paths**, not a blanket rule.
 
-Listing folders + counting attachments per folder is the most-called query in the admin UI. Optimizations:
+Three hot paths get explicit attention:
 
-- Folder counts cached in a transient with a 5-minute TTL
-- Cache invalidated on folder create/delete/move and attachment add/remove
-- Bulk-rebuild path skips invalidation per-attachment and bumps the cache version once at the end
+- **Folder listing + per-folder counts** — the most-called query in the admin UI. Cached aggressively, invalidated precisely on the events that would make the cache wrong.
+- **Smart folder queries** — particularly the meta-query-based ones, which are inherently slow on large libraries. Counts are cached short-term; result sets are paginated rather than fully materialized.
+- **Admin asset loading** — plugin CSS and JS are scoped to plugin pages only. The post editor and block editor don't pay for assets they don't need.
 
-### Smart folder queries
-
-Smart folders that hit `meta_query` (Missing Alt Text, Rating, Workflow Tag) are slow on large libraries. Mitigation:
-
-- Each smart folder caches its result count for 60 seconds
-- Listing the folder uses a paginated query, not a full result set
-- A future optimization will move the most-expensive smart folders to a denormalized index table
-
-### Asset loading
-
-Admin assets are only enqueued on plugin pages, not site-wide. The check uses a screen-detection helper so the plugin doesn't slow down post admin or the block editor.
+Other code paths take the straightforward approach. Optimization happens in response to measurement, not preemptively.
 
 ---
 
-## 10. I18n strategy
+## Extensibility through modules
 
-WordPress's gettext system is the substrate, but the plugin layers a **token dictionary** on top:
+Optional features are registered as modules with clear lifecycle hooks — enabled-check, bootstrap, dependency declaration. Modules that aren't enabled don't load; their code doesn't even reach the autoloader.
 
-- Token map: `'studio.media.alt_missing' => 'Missing alt text'`
-- A custom `gettext` filter hook intercepts every `__()` call and consults the dictionary first
-- Falls back to standard `.mo` lookup if the token isn't in the dictionary
-- The dictionary is keyed per-language; admin UI language can be set independently of the site locale
-
-This lets the plugin ship admin UI translations (en/es/fr) without requiring users to override the site locale globally — useful for agency sites where the staff speaks Spanish but the public-facing site is in English.
+This is the extensibility surface for Pro-tier add-ons and future sister plugins. New features can plug in without modifying core. Disabled features cost zero runtime.
 
 ---
 
-## 11. Module system
+## Internationalization that respects context
 
-Optional features are registered as **modules** under `app/Modules/`. The module pattern:
+Standard WordPress translations work via gettext. That's fine for site-facing strings, but the plugin needs something more flexible: an admin UI language **independent of the site locale.** Agency sites where the staff speaks one language and the public site is published in another are common; tying admin language to site locale forces a compromise.
 
-```
-class GalleryModule {
-    public static function isEnabled(): bool;     // Lite/Pro/license check
-    public static function bootstrap(): void;     // Wire hooks
-    public static function dependencies(): array; // Other modules required
-}
-```
-
-Module discovery walks the modules directory at boot, calls `isEnabled()` on each, and bootstraps enabled ones in dependency order. Disabled modules consume zero runtime — their files aren't even loaded.
-
-This is the extensibility surface for Pro-tier add-ons (or future Studio Grid sister plugins) that want to plug into StudioDarkroom without modifying core.
-
----
-
-## 12. Testing
-
-`/tests` contains PHPUnit suites split into `unit/` (pure functions, no WordPress) and `integration/` (full WordPress test environment). The CI pipeline runs both suites against PHP 8.1, 8.2, and 8.3 on every push.
-
-Coverage is currently strongest on:
-
-- Folder model
-- License state machine
-- Smart-folder query builder
-- Capability checks
-
-The admin UI layer is covered by manual QA in the release pass — a Playwright suite is planned.
+The plugin layers a custom translation system on top of standard gettext that lets administrators select an admin UI language separately from the site locale. The plugin currently ships English, Spanish, and French.
 
 ---
 
 ## Design principles
 
-Five constraints the architecture is optimized for:
+Five constraints the architecture is consistently optimized for:
 
-1. **Performance-first** — caching, paginated queries, screen-scoped asset loading. Admin UI must stay responsive on libraries with 50,000+ attachments.
-2. **Backward compatibility** — legacy procedural code continues to work; migration is incremental, not big-bang.
-3. **Modularity** — features are isolated modules with clear dependency declarations. Disabled modules don't load.
+1. **Performance-first** — caching, paginated queries, screen-scoped asset loading. The admin UI must stay responsive on libraries with 50,000+ attachments.
+2. **Backward compatibility** — legacy code continues to work; migration is gradual, never big-bang.
+3. **Modularity** — features are isolated with clear boundaries. Disabled modules don't load.
 4. **UI isolation** — all CSS scoped under plugin-specific classes; all JS scoped to plugin pages. The plugin doesn't bleed styles or behavior into post admin or the block editor.
 5. **Trust through the swap contract** — Lite ↔ Pro transitions never lose user data, even when downgrading or letting a license expire.
+
+---
+
+## What this document doesn't cover
+
+Implementation specifics — file paths, class signatures, capability names, cache keys, exact timing parameters, internal data structures — are intentionally omitted. They live in the private repo.
+
+For licensing inquiries, evaluation copies, or technical conversations with prospective collaborators: [studiodarkroom.com](https://studiodarkroom.com).
