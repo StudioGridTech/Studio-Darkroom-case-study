@@ -81,7 +81,7 @@ These aren't novel security techniques. They're the basics done consistently. Mo
 
 WordPress's default error handler renders "There has been a critical error" — a single sentence that gives the user nothing to act on. Worse, fatal errors during early hooks happen before WordPress even initializes its handler, leaving visitors looking at raw PHP output.
 
-The plugin registers its own fatal-error handler that catches early-hook fatals before they leak, captures a scrubbed environment snapshot, optionally forwards to Sentry, and renders a graceful admin notice. The Diagnostics page surfaces the same data plus role-preview matrices, environment checks, license status, and a copy-report button that produces a sharable Markdown snapshot for support tickets.
+The plugin registers its own fatal-error handler that catches early-hook fatals before they leak, captures a scrubbed environment snapshot, optionally forwards to a configured error-tracking service, and renders a graceful admin notice. The Diagnostics page surfaces the same data plus role-preview matrices, environment checks, license status, and a copy-report button that produces a sharable Markdown snapshot for support tickets.
 
 The design goal is simple: when something breaks, the customer should be able to send a useful report without installing a debugger or opening DevTools.
 
@@ -121,7 +121,7 @@ The plugin layers a custom translation system on top of standard gettext that le
 
 Five constraints the architecture is consistently optimized for:
 
-1. **Performance-first** — caching, paginated queries, screen-scoped asset loading. The admin UI must stay responsive on libraries with 50,000+ attachments.
+1. **Performance-first** — caching, paginated queries, screen-scoped asset loading. The admin UI is built to stay responsive at the scale the plugin has been validated against (currently libraries in the low thousands of attachments) and to keep that responsiveness as testing pushes the bar higher.
 2. **Backward compatibility** — legacy code continues to work; migration is gradual, never big-bang.
 3. **Modularity** — features are isolated with clear boundaries. Disabled modules don't load.
 4. **UI isolation** — all CSS scoped under plugin-specific classes; all JS scoped to plugin pages. The plugin doesn't bleed styles or behavior into post admin or the block editor.
