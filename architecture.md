@@ -41,7 +41,7 @@ The licensing layer is built around two principles:
 
 **State, not boolean.** License status isn't "valid / invalid." It's a state machine that captures the real-world transitions a license goes through over its lifetime — activation, periodic revalidation, transient unreachable states, eventual expiration, manual reactivation. Each state has explicit allowed actions and explicit UI surfacing. A license that *was* valid but failed its most recent revalidation behaves very differently from one that was *never* valid.
 
-**Grace, not hard-fail.** When the remote server is unreachable, the plugin doesn't lock immediately. There's a multi-day grace period that bridges transient outages. Customer sites keep working. The plugin only locks once "transient" no longer fits the situation.
+**Resilience over rigidity.** The licensing layer is designed to handle network failures, transient server downtime, and offline customer hosts without disrupting working sites. The exact behavior is deliberately omitted from this public document.
 
 Local development environments get a bypass — administrators can run unlicensed on `localhost`, `*.local`, and any environment WordPress identifies as `local`, `development`, or `staging`. Production stays strict. The result is a licensing layer that's invisible when things are working and predictable when they're not.
 
