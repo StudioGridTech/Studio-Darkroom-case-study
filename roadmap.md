@@ -59,7 +59,7 @@ Worth saying out loud so the conversation doesn't keep coming up:
 
 - **Hosted SaaS** — the plugin runs on the customer's WordPress site. There's no central server, no cloud library, no multi-site analytics service. Not now, not later.
 - **Mobile app** — out of scope. The admin UI is responsive enough for tablet review; phone-first media management isn't the audience.
-- **Frontend page builder integration as a primary surface** — Studio Darkroom is a backend plugin. Page builder companion blocks/elements may exist; the core experience stays in `wp-admin`.
+- **Page builder as the management surface** — gallery output and focal-point integrations ship today for Bricks, Gutenberg, Divi, and Elementor (and that surface will keep growing). What stays out of scope: moving the organize/curate/enrich workflow into the page-builder canvas. The management UI lives in `wp-admin` where editors expect it.
 
 ---
 
