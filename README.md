@@ -34,7 +34,6 @@ Auto-generated views that update as the library changes:
 | Unused Media | Duplicates (content-hash matched) |
 | Recently Uploaded | SVG / PDF / Video |
 | Favorites | Hero / Brand / Campaign tags |
-| Rating 1–5 stars | |
 
 These aren't separate tables — they're virtual views composed of `WP_Query` arguments, registered through a smart-folder registry so future features (or Pro-tier add-ons) can register their own without modifying core.
 
